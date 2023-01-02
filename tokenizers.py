@@ -3,8 +3,8 @@
 
 import random
 import torch
-from torch import autocast
-from diffusers import StableDiffusionPipeline, DDIMScheduler, DPMSolverMultistepScheduler, LMSDiscreteScheduler, EulerDiscreteScheduler, DDPMScheduler, UNet2DConditionModel, AutoencoderKL
+
+
 
 
 
@@ -184,6 +184,7 @@ def save_progress(tokenizer, text_encoder, accelerator, save_path):
 
 if __name__ == '__main__':
 
+    from diffusers import StableDiffusionPipeline, DDIMScheduler, DPMSolverMultistepScheduler, LMSDiscreteScheduler, EulerDiscreteScheduler, DDPMScheduler, UNet2DConditionModel, AutoencoderKL
     from transformers import CLIPTextModel, CLIPTokenizer
     import urllib.request 
     urllib.request.urlretrieve('https://huggingface.co/spaablauw/FloralMarble/resolve/main/FloralMarble-400.pt', './data/FloralMarble-400.pt')
