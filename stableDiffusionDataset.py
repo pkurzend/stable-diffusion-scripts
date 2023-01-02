@@ -200,7 +200,7 @@ class StableDiffusionDataset(Dataset):
 
         self.instance_images_path = []
         self.class_images_path = []
-        self.num_class_images
+        self.num_class_images = num_class_images
 
         if isinstance(concepts_list, str):
             try:
