@@ -14,14 +14,25 @@ import torch.utils.checkpoint
 from torch.utils.data import Dataset
 
 import PIL
+
+
+
+
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
-from diffusers import AutoencoderKL, DDPMScheduler, StableDiffusionPipeline, UNet2DConditionModel
+from diffusers import AutoencoderKL, DDPMScheduler, PNDMScheduler, StableDiffusionPipeline, UNet2DConditionModel
+from image_encoder import ImageEncoder
 from diffusers.optimization import get_scheduler
 from diffusers.utils import check_min_version
 from diffusers.utils.import_utils import is_xformers_available
 from huggingface_hub import HfFolder, Repository, whoami
+from packaging import version
+from PIL import Image, ImageDraw, ImageOps
+
+from torchvision import transforms
+from torchvision.transforms.functional import InterpolationMode
+from tqdm.auto import tqdm
 
 # TODO: remove and import from diffusers.utils when the new version of diffusers is released
 from packaging import version
