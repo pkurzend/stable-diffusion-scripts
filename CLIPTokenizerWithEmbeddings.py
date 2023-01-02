@@ -23,7 +23,7 @@ class CLIPTokenizerWithEmbeddings(CLIPTokenizer):
                     text = [t.replace(token, " ".join(all_tokens)) for t in text]
                 else:
                     text = text.replace(token, " ".join(all_tokens))
-            print(text)
+            
         return text
   
 
