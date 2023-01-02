@@ -1,10 +1,8 @@
 
-from transformers import CLIPTextModel, CLIPTokenizer
-from transformers import BatchEncoding
+
 import random
 import torch
-from torch import autocast
-from diffusers import StableDiffusionPipeline, DDIMScheduler, DPMSolverMultistepScheduler, LMSDiscreteScheduler, EulerDiscreteScheduler, DDPMScheduler, UNet2DConditionModel, AutoencoderKL
+
 
 
 from torch.utils.data import Dataset

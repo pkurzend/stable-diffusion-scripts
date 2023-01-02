@@ -1,6 +1,6 @@
 
-from transformers import CLIPTextModel, CLIPTokenizer
-from transformers import BatchEncoding
+
+
 import random
 import torch
 from torch import autocast
@@ -184,7 +184,7 @@ def save_progress(tokenizer, text_encoder, accelerator, save_path):
 
 if __name__ == '__main__':
 
-
+    from transformers import CLIPTextModel, CLIPTokenizer
     import urllib.request 
     urllib.request.urlretrieve('https://huggingface.co/spaablauw/FloralMarble/resolve/main/FloralMarble-400.pt', './data/FloralMarble-400.pt')
 
