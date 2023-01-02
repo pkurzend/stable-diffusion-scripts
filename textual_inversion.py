@@ -5,8 +5,7 @@ import os
 import random
 from pathlib import Path
 from typing import Optional
-from .tokenizers import CLIPTokenizerWithEmbeddings, save_progress
-from .datasets import StableDiffusionDataset, collate_fn
+
 
 import numpy as np
 import torch
@@ -30,7 +29,9 @@ from PIL import Image
 from torchvision import transforms
 from tqdm.auto import tqdm
 from transformers import CLIPTextModel
-
+#from multi_token_clip import MultiTokenCLIPTokenizer
+from tokenizers import CLIPTokenizerWithEmbeddings, save_progress
+from datasets import StableDiffusionDataset, collate_fn
 
 
 import json 

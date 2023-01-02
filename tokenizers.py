@@ -3,7 +3,6 @@
 
 import random
 import torch
-import diffusers 
 from transformers import CLIPTokenizer
 
 
