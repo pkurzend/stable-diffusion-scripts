@@ -47,7 +47,7 @@ class CLIPTokenizerWithEmbeddings(CLIPTokenizer):
             self.__setattr__('token2all_tokens', {})
 
     def load_embedding(self, token, path, text_encoder, use_orig_token=False):
-        #with torch.no_grad():
+        with torch.no_grad():
 
             self.init_attributes()  
             
@@ -110,43 +110,45 @@ class CLIPTokenizerWithEmbeddings(CLIPTokenizer):
 
         self.init_attributes()
 
-        if token in self.token2all_tokens: # token already exists
-            if if_exists=='error':
-                raise ValueError(
-                  f"The tokenizer already contains the token {token}. Please pass a different"
-                  " `placeholder_token` that is not already in the tokenizer."
-                )
-            
-            existing_tokens = self.token2all_tokens[token] # eg ['<glass>', '<glass>0', '<glass>1', '<glass>2']
-            tokens_to_add = [token+str(i+len(existing_tokens)-1) for i in range(n_vectors)]
-            num_added_toks = self.add_tokens(tokens_to_add)
 
-            self.token2all_tokens[token] += tokens_to_add
+        with torch.no_grad():
+            if token in self.token2all_tokens: # token already exists
+                if if_exists=='error':
+                    raise ValueError(
+                    f"The tokenizer already contains the token {token}. Please pass a different"
+                    " `placeholder_token` that is not already in the tokenizer."
+                    )
+                
+                existing_tokens = self.token2all_tokens[token] # eg ['<glass>', '<glass>0', '<glass>1', '<glass>2']
+                tokens_to_add = [token+str(i+len(existing_tokens)-1) for i in range(n_vectors)]
+                num_added_toks = self.add_tokens(tokens_to_add)
 
-
-        else:
-
-            tokens_to_add = [token] + [token+str(i) for i in range(n_vectors-1)]
-            num_added_toks = self.add_tokens(tokens_to_add)
-
-            self.token2all_tokens[token] = tokens_to_add
+                self.token2all_tokens[token] += tokens_to_add
 
 
-        text_encoder.resize_token_embeddings(self.__len__())
+            else:
 
-        token_ids = self.convert_tokens_to_ids(tokens_to_add)
+                tokens_to_add = [token] + [token+str(i) for i in range(n_vectors-1)]
+                num_added_toks = self.add_tokens(tokens_to_add)
 
-        token_embeds = text_encoder.get_input_embeddings().weight.data
+                self.token2all_tokens[token] = tokens_to_add
 
-        if initializer_token:
 
-            init_token_ids = self.encode(initializer_token, add_special_tokens=False)
-            for i, id in enumerate(token_ids):
-                token_embeds[id] = token_embeds[init_token_ids[i * len(init_token_ids)//n_vectors]]
+            text_encoder.resize_token_embeddings(self.__len__())
 
-        else:
-            for id in token_ids:
-                token_embeds[id] = torch.randn_like(token_embeds[id])
+            token_ids = self.convert_tokens_to_ids(tokens_to_add)
+
+            token_embeds = text_encoder.get_input_embeddings().weight.data
+
+            if initializer_token:
+
+                init_token_ids = self.encode(initializer_token, add_special_tokens=False)
+                for i, id in enumerate(token_ids):
+                    token_embeds[id] = token_embeds[init_token_ids[i * len(init_token_ids)//n_vectors]]
+
+            else:
+                for id in token_ids:
+                    token_embeds[id] = torch.randn_like(token_embeds[id])
 
 
 
