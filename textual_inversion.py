@@ -41,8 +41,8 @@ from torchvision import transforms
 from tqdm.auto import tqdm
 from transformers import CLIPTextModel
 #from multi_token_clip import MultiTokenCLIPTokenizer
-from tokenizers import CLIPTokenizerWithEmbeddings, save_progress
-from datasets import StableDiffusionDataset, collate_fn
+from CLIPTokenizerWithEmbeddings import CLIPTokenizerWithEmbeddings, save_progress
+from stableDiffusionDataset import StableDiffusionDataset, collate_fn
 
 
 import json 
