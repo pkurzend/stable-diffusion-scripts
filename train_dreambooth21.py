@@ -767,6 +767,14 @@ def main(args):
                 # Predict the noise residual
                 noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
 
+                # Get the target for loss depending on the prediction type
+                if noise_scheduler.config.prediction_type == "epsilon":
+                    noise = noise
+                elif noise_scheduler.config.prediction_type == "v_prediction":
+                    noise = noise_scheduler.get_velocity(latents, noise, timesteps)
+                else:
+                    raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
+
                 if args.with_prior_preservation:
                     # Chunk the noise and noise_pred into two parts and compute the loss on each part separately.
                     noise_pred, noise_pred_prior = torch.chunk(noise_pred, 2, dim=0)
