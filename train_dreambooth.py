@@ -644,8 +644,8 @@ def main(args):
         optimizer=optimizer,
         num_warmup_steps=args.lr_warmup_steps * args.gradient_accumulation_steps,
         num_training_steps=args.max_train_steps * args.gradient_accumulation_steps,
-        num_cycles=args.lr_num_cycles,
-        power=args.lr_power,
+        # num_cycles=args.lr_num_cycles,
+        # power=args.lr_power,
     )
 
     # Prepare everything with our `accelerator`.
