@@ -81,12 +81,7 @@ def parse_args():
     parser.add_argument("--train_text_encoder", action="store_true", help="Whether to train the text encoder (dreambooth and textual inversion train text_encoder)")
     parser.add_argument("--train_unet", action="store_true", help="Whether to train the unet (dreambooth and finetuning train unet)")
     
-    parser.add_argument(
-        "--save_steps",
-        type=int,
-        default=500,
-        help="Save learned_embeds.bin every X updates steps.",
-    )
+
 
     parser.add_argument(
         "--pretrained_model_name_or_path",

@@ -236,9 +236,14 @@ class StableDiffusionDataset(Dataset):
                 inst_img_path = [(x, sample_prompt_from_template()) for x in Path(concept["instance_data_dir"]).iterdir() if x.is_file()]
                 self.instance_images_path.extend(inst_img_path)
 
-            if num_class_images and with_prior_preservation:
-                class_img_path = [(x, concept["class_prompt"]) for x in Path(concept["class_data_dir"]).iterdir() if x.is_file()] # [('./abc.png', 'photo of house'), ...]
-                self.class_images_path.extend(class_img_path[:num_class_images])
+        if num_class_images and with_prior_preservation:
+
+            class_data_dirs =[]
+            for concept in concepts_list:
+                if concept["class_data_dir"] not in class_data_dirs:
+                    class_img_path = [(x, concept["class_prompt"]) for x in Path(concept["class_data_dir"]).iterdir() if x.is_file()] # [('./abc.png', 'photo of house'), ...]
+                    self.class_images_path.extend(class_img_path[:num_class_images])
+                    class_data_dirs.append(concept["class_data_dir"])
 
         random.shuffle(self.instance_images_path)
 
