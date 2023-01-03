@@ -563,6 +563,10 @@ def main(args):
             text_encoder, optimizer, train_dataloader, lr_scheduler
         )
         unet.to(accelerator.device, dtype=weight_dtype)
+        unet.eval()
+
+    if args.not_cache_latents:
+        vae.eval()
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
@@ -662,8 +666,10 @@ def main(args):
                     latents = latent_dist.sample() * 0.18215
 
                 # Sample noise that we'll add to the latents
-                noise = torch.randn_like(latents)
+                #noise = torch.randn_like(latents)
+                noise = torch.randn(latents.shape).to(latents.device).to(dtype=weight_dtype)
                 bsz = latents.shape[0]
+
                 # Sample a random timestep for each image
                 timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
                 timesteps = timesteps.long()
@@ -680,6 +686,7 @@ def main(args):
                         encoder_hidden_states = text_encoder(batch["input_ids"])[0]
 
                 # Predict the noise residual
+                print(noisy_latents.dtype, timesteps.dtype, encoder_hidden_states.dtype)
                 noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
 
                 # Get the target for loss depending on the prediction type
