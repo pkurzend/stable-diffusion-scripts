@@ -258,7 +258,7 @@ def parse_args():
     parser.add_argument(
         "--mixed_precision",
         type=str,
-        default="no",
+        default=None,
         choices=["no", "fp16", "bf16"],
         help=(
             "Whether to use mixed precision. Choose"
@@ -409,6 +409,7 @@ def main(args):
         args.pretrained_model_name_or_path,
         subfolder="unet",
         revision=args.revision,
+        torch_dtype=torch.float32
     )
 
     if args.enable_xformers_memory_efficient_attention:
@@ -423,7 +424,7 @@ def main(args):
 
     # decide which parameters to freeze
     # Freeze vae and unet
-    freeze_params(vae.parameters())
+    vae.requires_grad_(False)
 
     if not args.train_unet:
         freeze_params(unet.parameters())
@@ -441,7 +442,6 @@ def main(args):
     if args.gradient_checkpointing:
         if args.train_unet:
             unet.enable_gradient_checkpointing()
-
         if args.train_text_encoder:
             text_encoder.gradient_checkpointing_enable()
 
@@ -493,14 +493,15 @@ def main(args):
         eps=args.adam_epsilon,
     )
 
-    noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
+    noise_scheduler = DDPMScheduler.from_config(args.pretrained_model_name_or_path, subfolder="scheduler")
+
     train_dataset = StableDiffusionDataset(
         concepts_list=args.concepts_list,
         tokenizer=tokenizer,
         with_prior_preservation=args.with_prior_preservation,
         size=args.resolution,
         center_crop=args.center_crop,
-        num_class_images=args.num_class_images, # only needed for dreambooth
+        num_class_images=args.num_class_images,
         pad_tokens=args.pad_tokens,
         hflip=args.hflip
     )
@@ -510,9 +511,9 @@ def main(args):
     )
 
     weight_dtype = torch.float32
-    if accelerator.mixed_precision == "fp16":
+    if args.mixed_precision == "fp16":
         weight_dtype = torch.float16
-    elif accelerator.mixed_precision == "bf16":
+    elif args.mixed_precision == "bf16":
         weight_dtype = torch.bfloat16
 
 
@@ -523,9 +524,6 @@ def main(args):
     vae.to(accelerator.device, dtype=weight_dtype)
     text_encoder.to(accelerator.device, dtype=weight_dtype)
     
-
-
-
     if not args.not_cache_latents:
         latents_cache = []
         text_encoder_cache = []
@@ -535,16 +533,12 @@ def main(args):
                 batch["input_ids"] = batch["input_ids"].to(accelerator.device, non_blocking=True)
                 latents_cache.append(vae.encode(batch["pixel_values"]).latent_dist)
                 text_encoder_cache.append(batch["input_ids"])
-
         train_dataset = LatentsDataset(latents_cache, text_encoder_cache)
         train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=1, collate_fn=lambda x: x, shuffle=True)
 
         del vae
-
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-
-
 
     # Scheduler and math around the number of training steps.
     overrode_max_train_steps = False
@@ -560,29 +554,14 @@ def main(args):
         num_training_steps=args.max_train_steps * args.gradient_accumulation_steps,
     )
 
-    # for dreambooth and finetuning
     if args.train_unet:
         unet, text_encoder, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
                 unet, text_encoder, optimizer, train_dataloader, lr_scheduler
         )
-    
-    # for TI
     else:
         text_encoder, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
             text_encoder, optimizer, train_dataloader, lr_scheduler
         )
-
-        unet.to(accelerator.device, dtype=weight_dtype)
-        unet.eval()
-
-    # Keep vae and unet in eval model as we don't train these
-    if args.not_cache_latents:
-        vae.eval()
-        
-
-    
-
-
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
@@ -608,8 +587,6 @@ def main(args):
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
 
-
-
     def save_weights(step):
         # Create the pipeline using using the trained modules and save it.
         if accelerator.is_main_process:
@@ -618,7 +595,7 @@ def main(args):
             else:
                 text_enc_model = CLIPTextModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision)
 
-            scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
+            scheduler = DDPMScheduler.from_config(args.pretrained_model_name_or_path, subfolder="scheduler")
             pipeline = StableDiffusionPipeline.from_pretrained(
                 args.pretrained_model_name_or_path,
                 unet=accelerator.unwrap_model(unet),
@@ -659,42 +636,29 @@ def main(args):
                     torch.cuda.empty_cache()
             print(f"[*] Weights saved at {save_dir}")
 
-
-
-
-
-    global_step = 0
-    first_epoch = 0
-
+    # keep original embeddings as reference
+    orig_embeds_params = accelerator.unwrap_model(text_encoder).get_input_embeddings().weight.data.clone()
 
     # Only show the progress bar once on each machine.
     progress_bar = tqdm(range(global_step, args.max_train_steps), disable=not accelerator.is_local_main_process)
     progress_bar.set_description("Steps")
+    global_step = 0
+    first_epoch = 0
     loss_avg = AverageMeter()
     text_enc_context = nullcontext() if args.train_text_encoder else torch.no_grad()
-
-    # keep original embeddings as reference
-    orig_embeds_params = accelerator.unwrap_model(text_encoder).get_input_embeddings().weight.data.clone()
-
     for epoch in range(first_epoch, args.num_train_epochs):
         if args.train_unet:
             unet.train()
         text_encoder.train()
-
         for step, batch in enumerate(train_dataloader):
-            # Skip steps until we reach the resumed step
-
-
             with accelerator.accumulate(unet):
                 # Convert images to latent space
-
                 with torch.no_grad():
                     if not args.not_cache_latents:
                         latent_dist = batch[0][0]
                     else:
                         latent_dist = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist
-                    latents = latent_dist.sample().detach() * 0.18215
-
+                    latents = latent_dist.sample() * 0.18215
 
                 # Sample noise that we'll add to the latents
                 noise = torch.randn_like(latents)
@@ -703,11 +667,9 @@ def main(args):
                 timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
                 timesteps = timesteps.long()
 
-
                 # Add noise to the latents according to the noise magnitude at each timestep
                 # (this is the forward diffusion process)
                 noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
-
 
                 # Get the text embedding for conditioning
                 with text_enc_context:
@@ -721,29 +683,28 @@ def main(args):
 
                 # Get the target for loss depending on the prediction type
                 if noise_scheduler.config.prediction_type == "epsilon":
-                    target = noise
+                    noise = noise
                 elif noise_scheduler.config.prediction_type == "v_prediction":
-                    target = noise_scheduler.get_velocity(latents, noise, timesteps)
+                    noise = noise_scheduler.get_velocity(latents, noise, timesteps)
                 else:
                     raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
 
 
                 if args.with_prior_preservation:
-                    # Chunk the noise and model_pred into two parts and compute the loss on each part separately.
+                    # Chunk the noise and noise_pred into two parts and compute the loss on each part separately.
                     noise_pred, noise_pred_prior = torch.chunk(noise_pred, 2, dim=0)
-                    target, target_prior = torch.chunk(target, 2, dim=0)
+                    noise, noise_prior = torch.chunk(noise, 2, dim=0)
 
                     # Compute instance loss
-                    loss = F.mse_loss(noise_pred.float(), target.float(), reduction="none").mean([1, 2, 3]).mean()
+                    loss = F.mse_loss(noise_pred.float(), noise.float(), reduction="none").mean([1, 2, 3]).mean()
 
                     # Compute prior loss
-                    prior_loss = F.mse_loss(noise_pred_prior.float(), target_prior.float(), reduction="mean")
+                    prior_loss = F.mse_loss(noise_pred_prior.float(), noise_prior.float(), reduction="mean")
 
                     # Add the prior loss to the instance loss.
                     loss = loss + args.prior_loss_weight * prior_loss
                 else:
-
-                    loss = F.mse_loss(noise_pred.float(), target.float(), reduction="mean")
+                    loss = F.mse_loss(noise_pred.float(), noise.float(), reduction="mean")
 
                 print('loss ', loss)
                 accelerator.backward(loss)
@@ -757,7 +718,7 @@ def main(args):
 
                 optimizer.step()
                 lr_scheduler.step()
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=True)
                 loss_avg.update(loss.detach_(), bsz)
                 
 
@@ -776,12 +737,10 @@ def main(args):
                 progress_bar.set_postfix(**logs)
                 accelerator.log(logs, step=global_step)
 
-
             if global_step > 0 and not global_step % args.save_interval and global_step >= args.save_min_steps:
                 save_weights(global_step)
                 save_path = os.path.join(args.output_dir, f"learned_embeds-steps-{global_step}.pt")
                 save_progress(tokenizer, text_encoder, accelerator, save_path)
-
 
             progress_bar.update(1)
             global_step += 1
@@ -798,9 +757,6 @@ def main(args):
     save_progress(tokenizer, text_encoder, accelerator, save_path)
 
     accelerator.end_training()
-
-
-
 
 
 if __name__ == "__main__":
