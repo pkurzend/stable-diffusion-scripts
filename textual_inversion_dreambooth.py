@@ -424,7 +424,11 @@ def main(args):
 
     # decide which parameters to freeze
     # Freeze vae and unet
-    vae.requires_grad_(False)
+    # vae.requires_grad_(False)
+    freeze_params(vae.parameters())
+
+    if not args.train_unet and args.train_text_encoder:
+        raise ValueError('training complete text_encoder while freezing unet is not supported. Either train unet or set train_text_encoder to false. It only trains the embeddings then (textual inversion)')
 
     if not args.train_unet:
         freeze_params(unet.parameters())
@@ -469,20 +473,21 @@ def main(args):
     unet_params_to_optimize = [unet.parameters() ] * args.train_unet
 
     if args.train_text_encoder:
-        text_encoder_params_to_optimize = text_encoder.parameters()
+        text_encoder_params_to_optimize = [text_encoder.parameters()]
     else:
-        text_encoder_params_to_optimize = text_encoder.get_input_embeddings().parameters()  # only optimize the embeddings
+        text_encoder_params_to_optimize = [text_encoder.get_input_embeddings().parameters()]  # only optimize the embeddings
     
 
 
-    if args.text_encoder_learning_rate != args.learning_rate:
+    if args.train_unet and args.text_encoder_learning_rate != args.learning_rate:
         params_to_optimize = [
             {'params': unet_params_to_optimize[0]},
-            {'params': text_encoder_params_to_optimize, 'lr': args.text_encoder_learning_rate}
+            {'params': text_encoder_params_to_optimize[0], 'lr': args.text_encoder_learning_rate}
         ]
     else:
+        params_to_optimize = unet_params_to_optimize + text_encoder_params_to_optimize
         params_to_optimize = (
-            itertools.chain(*unet_params_to_optimize, text_encoder_params_to_optimize)
+            itertools.chain(*params_to_optimize)
         )
 
     optimizer = optimizer_class(
@@ -521,8 +526,8 @@ def main(args):
     # Move text_encode and vae to gpu.
     # For mixed precision training we cast the text_encoder and vae weights to half-precision
     # as these models are only used for inference, keeping weights in full precision is not required.
-    vae.to(accelerator.device, dtype=weight_dtype)
-    text_encoder.to(accelerator.device, dtype=weight_dtype)
+    # vae.to(accelerator.device, dtype=weight_dtype)
+    # text_encoder.to(accelerator.device, dtype=weight_dtype)
     
     if not args.not_cache_latents:
         latents_cache = []
@@ -566,11 +571,12 @@ def main(args):
                 unet, text_encoder, optimizer, train_dataloader, lr_scheduler
         )
     else:
-        unet, text_encoder, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-                unet, text_encoder, optimizer, train_dataloader, lr_scheduler
+        text_encoder, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+                 text_encoder, optimizer, train_dataloader, lr_scheduler
         )
-#         unet.to(accelerator.device, dtype=weight_dtype)
-#         unet.eval()
+        unet.to(accelerator.device, dtype=weight_dtype)
+        unet.eval()
+
 
     if args.not_cache_latents:
         vae.to(accelerator.device, dtype=weight_dtype)
@@ -672,9 +678,12 @@ def main(args):
                 with torch.no_grad():
                     if not args.not_cache_latents:
                         latent_dist = batch[0][0]
+                        latents = latent_dist.sample() * 0.18215
                     else:
-                        latent_dist = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist
-                    latents = latent_dist.sample().detach() * 0.18215
+                        latents = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.sample().detach()
+                        latents = latents * 0.18215
+                        # latent_dist = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist
+                    # latents = latent_dist.sample().detach() * 0.18215
 
                 # Sample noise that we'll add to the latents
                 #noise = torch.randn_like(latents)
@@ -698,10 +707,10 @@ def main(args):
                         #print('token_ids ', batch["input_ids"].dtype)
                         encoder_hidden_states = text_encoder(batch["input_ids"])[0]
                 #print('text_encoder ', text_encoder.dtype)
-                
+
                 # Predict the noise residual
                 #print(noisy_latents.dtype, timesteps.dtype, encoder_hidden_states.dtype)# torch.float16 torch.int64 torch.float32
-                sys.stdout.flush()
+                #sys.stdout.flush()
                 noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
 
                 # Get the target for loss depending on the prediction type
@@ -731,18 +740,18 @@ def main(args):
 
                 print('loss ', loss)
                 accelerator.backward(loss)
-                if accelerator.sync_gradients:
-                    params_to_clip = (
-                        itertools.chain(unet.parameters(), text_encoder.parameters()) if args.train_text_encoder
-                        else itertools.chain(unet.parameters() ,text_encoder.get_input_embeddings().parameters())
-                    )
-                    #accelerator.unscale_gradients(optimizer)
-                    accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
+                # if accelerator.sync_gradients:
+                #     params_to_clip = (
+                #         itertools.chain(unet.parameters(), text_encoder.parameters()) if args.train_text_encoder
+                #         else itertools.chain(unet.parameters() ,text_encoder.get_input_embeddings().parameters())
+                #     )
+                #     #accelerator.unscale_gradients(optimizer)
+                #     accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
 
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
-                loss_avg.update(loss.detach_(), bsz)
+                loss_avg.update(loss.detach(), bsz)
                 
 
                 if not args.train_text_encoder:
