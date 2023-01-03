@@ -5,7 +5,7 @@ import os
 import random
 from pathlib import Path
 from typing import Optional
-
+import sys
 
 import numpy as np
 import torch
@@ -511,9 +511,9 @@ def main(args):
     )
 
     weight_dtype = torch.float32
-    if args.mixed_precision == "fp16":
+    if accelerator.mixed_precision == "fp16":
         weight_dtype = torch.float16
-    elif args.mixed_precision == "bf16":
+    elif accelerator.mixed_precision == "bf16":
         weight_dtype = torch.bfloat16
 
 
@@ -537,8 +537,10 @@ def main(args):
         train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=1, collate_fn=lambda x: x, shuffle=True)
 
         del vae
+        del text_encoder
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+            
 
     # Scheduler and math around the number of training steps.
     overrode_max_train_steps = False
@@ -554,19 +556,28 @@ def main(args):
         num_training_steps=args.max_train_steps * args.gradient_accumulation_steps,
     )
 
+#     #works, no RuntimeError: expected scalar type Float but found Half
+#     unet, text_encoder, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+#                 unet, text_encoder, optimizer, train_dataloader, lr_scheduler
+#      )
+        
     if args.train_unet:
         unet, text_encoder, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
                 unet, text_encoder, optimizer, train_dataloader, lr_scheduler
         )
     else:
-        text_encoder, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-            text_encoder, optimizer, train_dataloader, lr_scheduler
+        unet, text_encoder, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+                unet, text_encoder, optimizer, train_dataloader, lr_scheduler
         )
-        unet.to(accelerator.device, dtype=weight_dtype)
-        unet.eval()
+#         unet.to(accelerator.device, dtype=weight_dtype)
+#         unet.eval()
 
     if args.not_cache_latents:
+        vae.to(accelerator.device, dtype=weight_dtype)
         vae.eval()
+        
+
+    
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
@@ -663,7 +674,7 @@ def main(args):
                         latent_dist = batch[0][0]
                     else:
                         latent_dist = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist
-                    latents = latent_dist.sample() * 0.18215
+                    latents = latent_dist.sample().detach() * 0.18215
 
                 # Sample noise that we'll add to the latents
                 #noise = torch.randn_like(latents)
@@ -672,21 +683,25 @@ def main(args):
 
                 # Sample a random timestep for each image
                 timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
-                timesteps = timesteps.long()
+                timesteps = timesteps.long() # torch.int64
 
                 # Add noise to the latents according to the noise magnitude at each timestep
                 # (this is the forward diffusion process)
-                noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
+                noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps) #torch.float16
 
                 # Get the text embedding for conditioning
                 with text_enc_context:
                     if not args.not_cache_latents:
-                        encoder_hidden_states = text_encoder(batch[0][1])[0]
+                        #print('token_ids ', batch[0][1].dtype)
+                        encoder_hidden_states = text_encoder(batch[0][1])[0] #torch.float32
                     else:
+                        #print('token_ids ', batch["input_ids"].dtype)
                         encoder_hidden_states = text_encoder(batch["input_ids"])[0]
-
+                #print('text_encoder ', text_encoder.dtype)
+                
                 # Predict the noise residual
-                print(noisy_latents.dtype, timesteps.dtype, encoder_hidden_states.dtype)
+                #print(noisy_latents.dtype, timesteps.dtype, encoder_hidden_states.dtype)# torch.float16 torch.int64 torch.float32
+                sys.stdout.flush()
                 noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
 
                 # Get the target for loss depending on the prediction type
