@@ -437,7 +437,7 @@ def main():
     text_encoder, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
         text_encoder, optimizer, train_dataloader, lr_scheduler
     )
-    accelerator.register_for_checkpointing(lr_scheduler)
+
 
     weight_dtype = torch.float32
     if accelerator.mixed_precision == "fp16":
@@ -478,22 +478,7 @@ def main():
     global_step = 0
     first_epoch = 0
 
-    if args.resume_from_checkpoint:
-        if args.resume_from_checkpoint != "latest":
-            path = os.path.basename(args.resume_from_checkpoint)
-        else:
-            # Get the most recent checkpoint
-            dirs = os.listdir(args.output_dir)
-            dirs = [d for d in dirs if d.startswith("checkpoint")]
-            dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
-            path = dirs[-1]
-        accelerator.print(f"Resuming from checkpoint {path}")
-        accelerator.load_state(os.path.join(args.output_dir, path))
-        global_step = int(path.split("-")[1])
 
-        resume_global_step = global_step * args.gradient_accumulation_steps
-        first_epoch = resume_global_step // num_update_steps_per_epoch
-        resume_step = resume_global_step % num_update_steps_per_epoch
 
     # Only show the progress bar once on each machine.
     progress_bar = tqdm(range(global_step, args.max_train_steps), disable=not accelerator.is_local_main_process)
@@ -506,10 +491,7 @@ def main():
         text_encoder.train()
         for step, batch in enumerate(train_dataloader):
             # Skip steps until we reach the resumed step
-            if args.resume_from_checkpoint and epoch == first_epoch and step < resume_step:
-                if step % args.gradient_accumulation_steps == 0:
-                    progress_bar.update(1)
-                continue
+
 
             with accelerator.accumulate(text_encoder):
                 # Convert images to latent space
@@ -565,11 +547,6 @@ def main():
                     save_path = os.path.join(args.output_dir, f"learned_embeds-steps-{global_step}.pt")
                     save_progress(tokenizer, text_encoder, accelerator, save_path)
 
-                if global_step % args.checkpointing_steps == 0:
-                    if accelerator.is_main_process:
-                        save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
-                        accelerator.save_state(save_path)
-                        logger.info(f"Saved state to {save_path}")
 
             logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)

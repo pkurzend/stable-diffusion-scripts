@@ -321,3 +321,51 @@ def collate_fn(examples, tokenizer):
     }
     return batch
 
+
+
+
+
+
+
+class PromptDataset(Dataset):
+    "A simple dataset to prepare the prompts to generate class images on multiple GPUs."
+
+    def __init__(self, prompt, num_samples):
+        self.prompt = prompt
+        self.num_samples = num_samples
+
+    def __len__(self):
+        return self.num_samples
+
+    def __getitem__(self, index):
+        example = {}
+        example["prompt"] = self.prompt
+        example["index"] = index
+        return example
+
+
+class LatentsDataset(Dataset):
+    def __init__(self, latents_cache, text_encoder_cache):
+        self.latents_cache = latents_cache
+        self.text_encoder_cache = text_encoder_cache
+
+    def __len__(self):
+        return len(self.latents_cache)
+
+    def __getitem__(self, index):
+        return self.latents_cache[index], self.text_encoder_cache[index]
+
+
+
+class AverageMeter:
+    def __init__(self, name=None):
+        self.name = name
+        self.reset()
+
+    def reset(self):
+        self.sum = self.count = self.avg = 0
+
+    def update(self, val, n=1):
+        self.sum += val * n
+        self.count += n
+        self.avg = self.sum / self.count
