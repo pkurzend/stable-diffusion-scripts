@@ -572,6 +572,7 @@ def main(args):
             text_encoder, optimizer, train_dataloader, lr_scheduler
         )
 
+        unet.to(accelerator.device, dtype=weight_dtype)
         unet.eval()
 
     # Keep vae and unet in eval model as we don't train these
@@ -579,7 +580,7 @@ def main(args):
         vae.eval()
         
 
-    unet.to(accelerator.device, dtype=weight_dtype)
+    
 
 
 
