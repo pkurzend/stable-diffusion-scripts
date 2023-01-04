@@ -400,7 +400,6 @@ def main(args):
         subfolder="text_encoder",
         revision=args.revision,
     )
-    print('text_encoder dtype on init ', text_encoder.dtype)
     vae = AutoencoderKL.from_pretrained(
         args.pretrained_model_name_or_path,
         subfolder="vae",
@@ -410,7 +409,7 @@ def main(args):
         args.pretrained_model_name_or_path,
         subfolder="unet",
         revision=args.revision,
-        torch_dtype=torch.float32
+        # torch_dtype=torch.float32
     )
 
     if args.enable_xformers_memory_efficient_attention:
@@ -424,13 +423,13 @@ def main(args):
             tokenizer.add_embedding(concept["token"], text_encoder, initializer_token=concept.get("initializer_token"), n_vectors=args.num_vec_per_token, if_exists='error')
 
     # decide which parameters to freeze
-
+    # Freeze vae and unet
+    # vae.requires_grad_(False)
+    freeze_params(vae.parameters())
 
     if not args.train_unet and args.train_text_encoder:
         raise ValueError('training complete text_encoder while freezing unet is not supported. Either train unet or set train_text_encoder to false. It only trains the embeddings then (textual inversion)')
-    
-    # decide which parameters to freeze
-    freeze_params(vae.parameters())
+
     if not args.train_unet:
         freeze_params(unet.parameters())
 
@@ -467,29 +466,29 @@ def main(args):
         optimizer_class = bnb.optim.AdamW8bit
     else:
         optimizer_class = torch.optim.AdamW
+
+    # Initialize the optimizer
+    # decide here which parameters to optimize
+    # different learning rates for different parts
+    unet_params_to_optimize = [unet.parameters() ] * args.train_unet
+
+    if args.train_text_encoder:
+        text_encoder_params_to_optimize = [text_encoder.parameters()]
+    else:
+        text_encoder_params_to_optimize = [text_encoder.get_input_embeddings().parameters()]  # only optimize the embeddings
     
-    if not args.train_text_encoder and not args.train_unet:
-        params_to_optimize = text_encoder.get_input_embeddings().parameters()
-    if args.train_unet and not args.train_text_encoder:
-        if args.train_unet and args.text_encoder_learning_rate != args.learning_rate:
-            params_to_optimize = [
-                {'params': unet.parameters()},
-                {'params': text_encoder.get_input_embeddings().parameters(), 'lr': args.text_encoder_learning_rate}
-            ]
-        else:
-            params_to_optimize = (
-                itertools.chain(unet.parameters(), text_encoder.get_input_embeddings().parameters())
-            )
-    if args.train_text_encoder and args.train_unet:
-        if args.train_unet and args.text_encoder_learning_rate != args.learning_rate:
-            params_to_optimize = [
-                {'params': unet.parameters()},
-                {'params': text_encoder.parameters(), 'lr': args.text_encoder_learning_rate}
-            ]
-        else:
-            params_to_optimize = (
-                itertools.chain(unet.parameters(), text_encoder.parameters())
-            )
+
+
+    if args.train_unet and args.text_encoder_learning_rate != args.learning_rate:
+        params_to_optimize = [
+            {'params': unet_params_to_optimize[0]},
+            {'params': text_encoder_params_to_optimize[0], 'lr': args.text_encoder_learning_rate}
+        ]
+    else:
+        params_to_optimize = unet_params_to_optimize + text_encoder_params_to_optimize
+        params_to_optimize = (
+            itertools.chain(*params_to_optimize)
+        )
 
     optimizer = optimizer_class(
         params_to_optimize,
@@ -522,16 +521,15 @@ def main(args):
     elif accelerator.mixed_precision == "bf16":
         weight_dtype = torch.bfloat16
 
+
+
     # Move text_encode and vae to gpu.
     # For mixed precision training we cast the text_encoder and vae weights to half-precision
     # as these models are only used for inference, keeping weights in full precision is not required.
-
+    # vae.to(accelerator.device, dtype=weight_dtype)
+    # text_encoder.to(accelerator.device, dtype=weight_dtype)
     
     if not args.not_cache_latents:
-        vae.to(accelerator.device, dtype=weight_dtype)
-        vae.eval()
-        #text_encoder.to(accelerator.device, dtype=weight_dtype)
-
         latents_cache = []
         text_encoder_cache = []
         for batch in tqdm(train_dataloader, desc="Caching latents"):
@@ -544,10 +542,10 @@ def main(args):
         train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=1, collate_fn=lambda x: x, shuffle=True)
 
         del vae
-
+        del text_encoder
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-    print('text_encoder dtype after caching latents ', text_encoder.dtype)
+            
 
     # Scheduler and math around the number of training steps.
     overrode_max_train_steps = False
@@ -567,14 +565,14 @@ def main(args):
 #     unet, text_encoder, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
 #                 unet, text_encoder, optimizer, train_dataloader, lr_scheduler
 #      )
-
+        
     if args.train_unet:
         unet, text_encoder, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
                 unet, text_encoder, optimizer, train_dataloader, lr_scheduler
         )
-    else:    
+    else:
         text_encoder, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-            text_encoder, optimizer, train_dataloader, lr_scheduler
+                 text_encoder, optimizer, train_dataloader, lr_scheduler
         )
         unet.to(accelerator.device, dtype=weight_dtype)
         unet.eval()
@@ -662,8 +660,7 @@ def main(args):
 
     # keep original embeddings as reference
     orig_embeds_params = accelerator.unwrap_model(text_encoder).get_input_embeddings().weight.data.clone()
-    
-    print('text_encoder dtype on train start ', text_encoder.dtype)
+
     # Only show the progress bar once on each machine.
     progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
     progress_bar.set_description("Steps")
@@ -676,19 +673,17 @@ def main(args):
             unet.train()
         text_encoder.train()
         for step, batch in enumerate(train_dataloader):
-            to_accumulate = unet if args.train_unet else text_encoder
-            with accelerator.accumulate(to_accumulate):
+            with accelerator.accumulate(unet):
                 # Convert images to latent space
                 with torch.no_grad():
                     if not args.not_cache_latents:
                         latent_dist = batch[0][0]
-                        latents = latent_dist.sample().detach().to(dtype=weight_dtype) * 0.18215
+                        latents = latent_dist.sample() * 0.18215
                     else:
                         latents = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.sample().detach()
                         latents = latents * 0.18215
                         # latent_dist = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist
                     # latents = latent_dist.sample().detach() * 0.18215
-                    # print('latents ', latents.dtype, latents.device)
 
                 # Sample noise that we'll add to the latents
                 #noise = torch.randn_like(latents)
@@ -698,43 +693,35 @@ def main(args):
                 # Sample a random timestep for each image
                 timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
                 timesteps = timesteps.long() # torch.int64
-                #print('timesteps ', torch.isinf(timesteps).any())
 
                 # Add noise to the latents according to the noise magnitude at each timestep
                 # (this is the forward diffusion process)
                 noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps) #torch.float16
-                #print('noisy_latents ', torch.isinf(noisy_latents).any())
 
                 # Get the text embedding for conditioning
-
-                if not args.not_cache_latents:
-                    #print('token_ids ', batch[0][1].dtype)
-                    encoder_hidden_states = text_encoder(batch[0][1])[0].to(dtype=weight_dtype) #torch.float32
-                else:
-                    #print('token_ids ', batch["input_ids"].dtype)
-                    encoder_hidden_states = text_encoder(batch["input_ids"])[0].to(dtype=weight_dtype)
-                #print('encoder_hidden_states ', torch.isinf(encoder_hidden_states).any())
+                with text_enc_context:
+                    if not args.not_cache_latents:
+                        #print('token_ids ', batch[0][1].dtype)
+                        encoder_hidden_states = text_encoder(batch[0][1])[0] #torch.float32
+                    else:
+                        #print('token_ids ', batch["input_ids"].dtype)
+                        encoder_hidden_states = text_encoder(batch["input_ids"])[0]
+                #print('text_encoder ', text_encoder.dtype)
 
                 # Predict the noise residual
                 #print(noisy_latents.dtype, timesteps.dtype, encoder_hidden_states.dtype)# torch.float16 torch.int64 torch.float32
                 #sys.stdout.flush()
-                unet.config.upcast_attention = False
                 noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
-                #print(torch.isnan(noise_pred).all())
-                #print(noise_pred) # all are none for 768 version
-                #print(noise_pred.shape)
-                
+
                 # Get the target for loss depending on the prediction type
-                #print(torch.isnan(noise).any(), torch.isinf(noise).any())
                 if noise_scheduler.config.prediction_type == "epsilon":
                     noise = noise
                 elif noise_scheduler.config.prediction_type == "v_prediction":
                     noise = noise_scheduler.get_velocity(latents, noise, timesteps)
                 else:
                     raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
-                #print(torch.isnan(noise).any(), torch.isinf(noise).any())
-                
-                #print(noise.shape)
+
+
                 if args.with_prior_preservation:
                     # Chunk the noise and noise_pred into two parts and compute the loss on each part separately.
                     noise_pred, noise_pred_prior = torch.chunk(noise_pred, 2, dim=0)
@@ -742,25 +729,24 @@ def main(args):
 
                     # Compute instance loss
                     loss = F.mse_loss(noise_pred.float(), noise.float(), reduction="none").mean([1, 2, 3]).mean()
-                    #print('loss ', loss)
+
                     # Compute prior loss
                     prior_loss = F.mse_loss(noise_pred_prior.float(), noise_prior.float(), reduction="mean")
-                    #print('prior_loss ', prior_loss)
+
                     # Add the prior loss to the instance loss.
                     loss = loss + args.prior_loss_weight * prior_loss
-                    #print('total loss ', loss)
                 else:
                     loss = F.mse_loss(noise_pred.float(), noise.float(), reduction="mean")
 
-                # print('loss ', loss, loss.dtype, loss.device)
+                print('loss ', loss)
                 accelerator.backward(loss)
-                if accelerator.sync_gradients:
-                    params_to_clip = (
-                        itertools.chain(unet.parameters(), text_encoder.parameters()) if args.train_text_encoder
-                        else itertools.chain(unet.parameters() ,text_encoder.get_input_embeddings().parameters())
-                    )
-                    #accelerator.unscale_gradients(optimizer)
-                    accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
+                # if accelerator.sync_gradients:
+                #     params_to_clip = (
+                #         itertools.chain(unet.parameters(), text_encoder.parameters()) if args.train_text_encoder
+                #         else itertools.chain(unet.parameters() ,text_encoder.get_input_embeddings().parameters())
+                #     )
+                #     #accelerator.unscale_gradients(optimizer)
+                #     accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
 
                 optimizer.step()
                 lr_scheduler.step()
