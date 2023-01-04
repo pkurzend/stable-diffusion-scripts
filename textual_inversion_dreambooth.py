@@ -44,7 +44,7 @@ from transformers import CLIPTextModel
 from CLIPTokenizerWithEmbeddings import CLIPTokenizerWithEmbeddings, save_progress
 from stableDiffusionDataset import StableDiffusionDataset, collate_fn, PromptDataset, LatentsDataset, AverageMeter
 
-
+import gc
 import json 
 
 
@@ -315,7 +315,7 @@ def parse_args():
     # --train_unet, --train_text_encoder
     # --train_unet
 
-
+os.system('nvidia-smi')
 def freeze_params(params):
     for param in params:
         param.requires_grad = False
@@ -383,7 +383,9 @@ def main(args):
                             image.save(image_filename)
 
         del pipeline
+        print('torch.cuda.is_available() ', torch.cuda.is_available())
         if torch.cuda.is_available():
+            gc.collect()
             torch.cuda.empty_cache()
 
     # Load the tokenizer and add the placeholder token as a additional special token
@@ -544,10 +546,14 @@ def main(args):
         train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=1, collate_fn=lambda x: x, shuffle=True)
 
         del vae
-
+        
+        print('torch.cuda.is_available() ', torch.cuda.is_available())
         if torch.cuda.is_available():
+            gc.collect()
             torch.cuda.empty_cache()
     print('text_encoder dtype after caching latents ', text_encoder.dtype)
+    
+    os.system('nvidia-smi')
 
     # Scheduler and math around the number of training steps.
     overrode_max_train_steps = False
