@@ -402,7 +402,7 @@ def main(args):
         subfolder="text_encoder",
         revision=args.revision,
     )
-    print('text_encoder dtype on init ', text_encoder.dtype)
+
     vae = AutoencoderKL.from_pretrained(
         args.pretrained_model_name_or_path,
         subfolder="vae",
@@ -414,6 +414,10 @@ def main(args):
         revision=args.revision,
         torch_dtype=torch.float32
     )
+    
+    print('text_encoder dtype on init ', text_encoder.dtype)
+    print('vae dtype on init ', vae.dtype)
+    print('unet dtype on init ', unet.dtype)
 
     if args.enable_xformers_memory_efficient_attention:
         if is_xformers_available():
@@ -424,6 +428,7 @@ def main(args):
     for concept in args.concepts_list:
         if concept.get('token'):
             tokenizer.add_embedding(concept["token"], text_encoder, initializer_token=concept.get("initializer_token"), n_vectors=args.num_vec_per_token, if_exists='error')
+            print(f'tokenizer added token {concept["token"]}: ', len(tokenizer), tokenizer(concept["token"]))
 
     # decide which parameters to freeze
 
@@ -544,15 +549,17 @@ def main(args):
                 text_encoder_cache.append(batch["input_ids"])
         train_dataset = LatentsDataset(latents_cache, text_encoder_cache)
         train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=1, collate_fn=lambda x: x, shuffle=True)
-
+        print('text_encoder dtype after caching latents ', text_encoder.dtype)
+        print('vae dtype  after caching latents ', vae.dtype)
+        print('unet dtype  after caching latents ', unet.dtype)
         del vae
         
         print('torch.cuda.is_available() ', torch.cuda.is_available())
         if torch.cuda.is_available():
             gc.collect()
             torch.cuda.empty_cache()
-    print('text_encoder dtype after caching latents ', text_encoder.dtype)
-    
+     
+
     os.system('nvidia-smi')
 
     # Scheduler and math around the number of training steps.
@@ -625,21 +632,37 @@ def main(args):
             else:
                 text_enc_model = CLIPTextModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision)
 
-            scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
+            #scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
+            
+            unet_samples_model = accelerator.unwrap_model(unet)
+            vae_samples_model = AutoencoderKL.from_pretrained(
+                            args.pretrained_model_name_or_path,
+                            subfolder="vae",
+                            revision=args.revision,
+                        )
+            vae_samples_model.to(dtype=text_enc_model.dtype)
+            
+            print('text_enc_model dtype before save pipeline ', text_enc_model.dtype)
+            print('vae_samples_model dtype before save pipeline  ', vae_samples_model.dtype)
+            print('unet_samples_model dtype before save pipeline  ', unet_samples_model.dtype)
             pipeline = StableDiffusionPipeline.from_pretrained(
                 args.pretrained_model_name_or_path,
-                unet=accelerator.unwrap_model(unet),
+                tokenizer=tokenizer,
+                unet=unet_samples_model,
                 text_encoder=text_enc_model,
-                vae=AutoencoderKL.from_pretrained(
-                    args.pretrained_vae_name_or_path or args.pretrained_model_name_or_path,
-                    subfolder=None if args.pretrained_vae_name_or_path else "vae",
-                    revision=None if args.pretrained_vae_name_or_path else args.revision,
-                ),
+                vae=vae_samples_model,
                 safety_checker=None,
-                scheduler=scheduler,
-                torch_dtype=torch.float16,
+                #scheduler=scheduler,
+                torch_dtype=text_enc_model.dtype,
                 revision=args.revision,
             )
+            print('text_enc_model dtype after save pipeline ', text_enc_model.dtype)
+            print('vae_samples_model dtype after save pipeline  ', vae_samples_model.dtype)
+            print('unet_samples_model dtype after save pipeline  ', unet_samples_model.dtype)
+            
+            pipeline.scheduler = DDPMScheduler.from_config(pipeline.scheduler.config)
+            
+            
             save_dir = os.path.join(args.output_dir, f"{step}")
             pipeline.save_pretrained(save_dir)
             with open(os.path.join(save_dir, "args.json"), "w") as f:
@@ -670,6 +693,9 @@ def main(args):
     orig_embeds_params = accelerator.unwrap_model(text_encoder).get_input_embeddings().weight.data.clone()
     
     print('text_encoder dtype on train start ', text_encoder.dtype)
+    if args.not_cache_latents:
+        print('vae dtype on train start ', vae.dtype)
+    print('unet dtype on train start ', unet.dtype)
     # Only show the progress bar once on each machine.
     progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
     progress_bar.set_description("Steps")
@@ -792,6 +818,7 @@ def main(args):
             if global_step > 0 and not global_step % args.save_interval and global_step >= args.save_min_steps:
                 save_weights(global_step)
                 save_path = os.path.join(args.output_dir, f"learned_embeds-steps-{global_step}.pt")
+                print('embeddings save_path ', save_path)
                 save_progress(tokenizer, text_encoder, accelerator, save_path)
 
             progress_bar.update(1)

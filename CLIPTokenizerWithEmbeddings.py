@@ -168,15 +168,19 @@ class CLIPTokenizerWithEmbeddings(CLIPTokenizer):
 
 def save_progress(tokenizer, text_encoder, accelerator, save_path):
 
+    print('save added tokens: ', tokenizer.token2all_tokens.keys())
+    learned_embeds_dict = {}
     for placeholder_token in tokenizer.token2all_tokens.keys():
         placeholder_token_ids = tokenizer.encode(placeholder_token, add_special_tokens=False)
 
         learned_embeds = accelerator.unwrap_model(text_encoder).get_input_embeddings().weight[placeholder_token_ids]
+        print(f'embedding.shape of {placeholder_token}: ', learned_embeds.shape)
 
         if len(placeholder_token_ids) == 1:
+                # add extra dimension
                 learned_embeds = learned_embeds[None]
-        learned_embeds_dict = {placeholder_token: learned_embeds.detach().cpu()}
-        torch.save(learned_embeds_dict, save_path)
+        learned_embeds_dict[placeholder_token] =  learned_embeds.detach().cpu()
+    torch.save(learned_embeds_dict, save_path)
 
 
 
