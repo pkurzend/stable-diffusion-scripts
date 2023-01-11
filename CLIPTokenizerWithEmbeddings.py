@@ -167,7 +167,9 @@ class CLIPTokenizerWithEmbeddings(CLIPTokenizer):
 
 
 def save_progress(tokenizer, text_encoder, accelerator, save_path):
-
+    if not hasattr(tokenizer, 'token2all_tokens'):
+        print('no added tokens, no embeddings to save')
+        return
     print('save added tokens: ', tokenizer.token2all_tokens.keys())
     learned_embeds_dict = {}
     for placeholder_token in tokenizer.token2all_tokens.keys():
