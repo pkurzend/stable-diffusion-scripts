@@ -218,7 +218,7 @@ class StableDiffusionDataset(Dataset):
 
             if concept.get("promptsfile") is not None:
                 promptsfile = get_promptsfile(concept["promptsfile"])
-                inst_img_path = [(x['file_name'], x['text']) for x in promptsfile if os.path.exists(concept["instance_data_dir"].rstrip('/') + '/' +x['file_name'])]
+                inst_img_path = [(concept["instance_data_dir"].rstrip('/') + '/' +x['file_name'], x['text']) for x in promptsfile if os.path.exists(concept["instance_data_dir"].rstrip('/') + '/' +x['file_name'])]
                 self.instance_images_path.extend(inst_img_path)
 
             elif concept.get("instance_prompt") is not None:
