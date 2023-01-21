@@ -23,4 +23,5 @@ venv/bin/accelerate launch train_inpainting_dreambooth.py \
   --save_infer_steps=35 \
   --concepts_list="concepts_list.json" \
   --not_cache_latents \
-  --hflip
+  --hflip \
+  --inpainting
