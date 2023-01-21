@@ -268,6 +268,10 @@ def parse_args(input_args=None):
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
     if env_local_rank != -1 and env_local_rank != args.local_rank:
         args.local_rank = env_local_rank
+    
+    if args.inpainting and not args.not_cache_latents:
+        print("Can not cache latents for inpainting")
+        args.not_cache_latents = True
 
     return args
 
@@ -512,27 +516,26 @@ def main(args):
                     inp_mask = Image.new("L", (512, 512), color=255)
 
                     with torch.autocast("cuda"),torch.inference_mode():
-                        for example in tqdm(
-                            sample_dataloader, desc="Generating class images", disable=not accelerator.is_local_main_process
-                        ):
+                        for example in tqdm(sample_dataloader, desc="Generating class images", disable=not accelerator.is_local_main_process):
                             images = pipeline(
                                 prompt=example["prompt"],
                                 image=inp_img,
                                 mask_image=inp_mask,
                                 num_inference_steps=args.save_infer_steps
                             ).images
+                            for i, image in enumerate(images):
+                                hash_image = hashlib.sha1(image.tobytes()).hexdigest()
+                                image_filename = class_images_dir / f"{example['index'][i] + cur_class_images}-{hash_image}.jpg"
+                                image.save(image_filename)
 
                 else:
                     with torch.inference_mode(): # torch.autocast("cuda"),
-                        for example in tqdm(
-                            sample_dataloader, desc="Generating class images", disable=not accelerator.is_local_main_process
-                        ):
+                        for example in tqdm(sample_dataloader, desc="Generating class images", disable=not accelerator.is_local_main_process):
                             images = pipeline(example["prompt"]).images
-
-                for i, image in enumerate(images):
-                    hash_image = hashlib.sha1(image.tobytes()).hexdigest()
-                    image_filename = class_images_dir / f"{example['index'][i] + cur_class_images}-{hash_image}.jpg"
-                    image.save(image_filename)
+                            for i, image in enumerate(images):
+                                hash_image = hashlib.sha1(image.tobytes()).hexdigest()
+                                image_filename = class_images_dir / f"{example['index'][i] + cur_class_images}-{hash_image}.jpg"
+                                image.save(image_filename)
 
         del pipeline
         if torch.cuda.is_available():
@@ -714,7 +717,9 @@ def main(args):
         num_training_steps=args.max_train_steps * args.gradient_accumulation_steps,
     )
 
+    print(type(text_encoder))
     if args.train_text_encoder:
+        print("Hi")
         unet, text_encoder, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
             unet, text_encoder, optimizer, train_dataloader, lr_scheduler
         )
@@ -747,16 +752,19 @@ def main(args):
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
 
-    def save_weights(step):
+    print(type(text_encoder))
+    def save_weights(step, unet, text_encoder, vae):
         # Create the pipeline using using the trained modules and save it.
         if accelerator.is_main_process:
             if args.train_text_encoder:
-                text_enc_model = accelerator.unwrap_model(text_encoder, keep_fp32_wrapper=args.inpainting)
+                #text_enc_model = accelerator.unwrap_model(text_encoder, keep_fp32_wrapper=args.inpainting)
+                text_enc_model = accelerator.unwrap_model(text_encoder)
             else:
                 text_enc_model = CLIPTextModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision)
             if args.inpainting:
                 scheduler = DDIMScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", clip_sample=False, set_alpha_to_one=False)
-                unet=accelerator.unwrap_model(unet, keep_fp32_wrapper=True).to(torch.float16)
+                #unet=accelerator.unwrap_model(unet, keep_fp32_wrapper=True).to(torch.float16)
+                unet=accelerator.unwrap_model(unet).to(torch.float16)
                 text_encoder=text_enc_model.to(torch.float16)
             else:
                 scheduler =  DDPMScheduler.from_config(args.pretrained_model_name_or_path, subfolder="scheduler")
@@ -915,7 +923,7 @@ def main(args):
                 accelerator.log(logs, step=global_step)
 
             if global_step > 0 and not global_step % args.save_interval and global_step >= args.save_min_steps:
-                save_weights(global_step)
+                save_weights(global_step, unet, text_encoder, vae)
 
             progress_bar.update(1)
             global_step += 1
@@ -925,7 +933,7 @@ def main(args):
 
         accelerator.wait_for_everyone()
 
-    save_weights(global_step)
+    save_weights(global_step, unet, text_encoder, vae)
 
     accelerator.end_training()
 
