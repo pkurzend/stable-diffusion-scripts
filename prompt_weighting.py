@@ -14,6 +14,8 @@ import random
 
 from diffusers import StableDiffusionPipeline
 
+# inspiration from here: https://huggingface.co/waifu-research-department/long-prompt-weighting-pipeline
+
 
 
 re_attention = re.compile(
