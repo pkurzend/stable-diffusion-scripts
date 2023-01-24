@@ -643,6 +643,7 @@ def main(args):
     )
 
     if args.train_text_encoder:
+        print("CHP2")
         unet, text_encoder, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
             unet, text_encoder, optimizer, train_dataloader, lr_scheduler
         )
@@ -675,14 +676,14 @@ def main(args):
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
 
-    def save_weights(step):
+    def save_weights(step, text_encoder):
         # Create the pipeline using using the trained modules and save it.
         if accelerator.is_main_process:
             if args.train_text_encoder:
                 text_enc_model = accelerator.unwrap_model(text_encoder)
             else:
                 text_enc_model = CLIPTextModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision)
-            scheduler =  DDPMScheduler.from_config(args.pretrained_model_name_or_path, subfolder="scheduler")
+            scheduler =  DDIMScheduler.from_config(args.pretrained_model_name_or_path, subfolder="scheduler")
             pipeline = StableDiffusionPipeline.from_pretrained(
                 args.pretrained_model_name_or_path,
                 unet=accelerator.unwrap_model(unet),
@@ -810,7 +811,7 @@ def main(args):
                 accelerator.log(logs, step=global_step)
 
             if global_step > 0 and not global_step % args.save_interval and global_step >= args.save_min_steps:
-                save_weights(global_step)
+                save_weights(global_step, text_encoder)
 
             progress_bar.update(1)
             global_step += 1
@@ -820,7 +821,7 @@ def main(args):
 
         accelerator.wait_for_everyone()
 
-    save_weights(global_step)
+    save_weights(global_step, text_encoder)
 
     accelerator.end_training()
 

@@ -23,6 +23,7 @@ from diffusers.optimization import get_scheduler
 from huggingface_hub import HfFolder, Repository, whoami
 from PIL import Image
 from torchvision import transforms
+from torchvision.utils import save_image
 from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
 
@@ -51,7 +52,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--revision",
         type=str,
-        default="fp16",
+        default=None,
         required=False,
         help="Revision of pretrained model identifier from huggingface.co/models.",
     )
@@ -236,7 +237,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--mixed_precision",
         type=str,
-        default="fp16",
+        default=None,
         choices=["no", "fp16", "bf16"],
         help=(
             "Whether to use mixed precision. Choose between fp16 and bf16 (bfloat16). Bf16 requires PyTorch >="
@@ -250,12 +251,12 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--concepts_list",
         type=str,
-        default="concepts_list.json",
+        default=None,
         help="Path to json containing multiple concepts, will overwrite parameters like instance_prompt, class_prompt, etc.",
     )
     parser.add_argument(
         "--inpainting", 
-        action="store_false",
+        action="store_true",
         default=False,
         help="Train the model for inpainting by passing masked images."
     )
@@ -286,7 +287,6 @@ def get_cutout_holes(height, width, min_holes=8, max_holes=32, min_height=16, ma
         x2 = x1 + hole_width
         holes.append((x1, y1, x2, y2))
     return holes
-
 
 def generate_random_mask(image):
     mask = torch.zeros_like(image[:1])
@@ -515,7 +515,7 @@ def main(args):
                     inp_img = Image.new("RGB", (512, 512), color=(0, 0, 0))
                     inp_mask = Image.new("L", (512, 512), color=255)
 
-                    with torch.autocast("cuda"),torch.inference_mode():
+                    with torch.inference_mode(): # torch.autocast("cuda"),
                         for example in tqdm(sample_dataloader, desc="Generating class images", disable=not accelerator.is_local_main_process):
                             images = pipeline(
                                 prompt=example["prompt"],
@@ -717,9 +717,7 @@ def main(args):
         num_training_steps=args.max_train_steps * args.gradient_accumulation_steps,
     )
 
-    print(type(text_encoder))
     if args.train_text_encoder:
-        print("Hi")
         unet, text_encoder, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
             unet, text_encoder, optimizer, train_dataloader, lr_scheduler
         )
@@ -752,22 +750,17 @@ def main(args):
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
 
-    print(type(text_encoder))
     def save_weights(step, unet, text_encoder, vae):
         # Create the pipeline using using the trained modules and save it.
         if accelerator.is_main_process:
             if args.train_text_encoder:
-                #text_enc_model = accelerator.unwrap_model(text_encoder, keep_fp32_wrapper=args.inpainting)
                 text_enc_model = accelerator.unwrap_model(text_encoder)
             else:
                 text_enc_model = CLIPTextModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision)
+            scheduler =  DDIMScheduler.from_config(args.pretrained_model_name_or_path, subfolder="scheduler")
             if args.inpainting:
-                scheduler = DDIMScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", clip_sample=False, set_alpha_to_one=False)
-                #unet=accelerator.unwrap_model(unet, keep_fp32_wrapper=True).to(torch.float16)
                 unet=accelerator.unwrap_model(unet).to(torch.float16)
                 text_encoder=text_enc_model.to(torch.float16)
-            else:
-                scheduler =  DDPMScheduler.from_config(args.pretrained_model_name_or_path, subfolder="scheduler")
             pipeline = pipeline_choice.from_pretrained(
                 args.pretrained_model_name_or_path,
                 unet=accelerator.unwrap_model(unet),
@@ -845,7 +838,7 @@ def main(args):
                         latent_dist = batch[0][0]
                     else:
                         latent_dist = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist
-                        if args.inpainting: 
+                        if args.inpainting:
                             masked_latent_dist = vae.encode(batch["masked_image_values"].to(dtype=weight_dtype)).latent_dist
                     latents = latent_dist.sample() * 0.18215
                     if args.inpainting:
@@ -880,13 +873,13 @@ def main(args):
                 noise_pred = unet(noisy_latents if not args.inpainting else latent_model_input, timesteps, encoder_hidden_states).sample
 
                 # Get the target for loss depending on the prediction type
-                if not args.inpainting:
-                    if noise_scheduler.config.prediction_type == "epsilon":
-                        noise = noise
-                    elif noise_scheduler.config.prediction_type == "v_prediction":
-                        noise = noise_scheduler.get_velocity(latents, noise, timesteps)
-                    else:
-                        raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
+                #if not args.inpainting:
+                if noise_scheduler.config.prediction_type == "epsilon":
+                    noise = noise
+                elif noise_scheduler.config.prediction_type == "v_prediction":
+                    noise = noise_scheduler.get_velocity(latents, noise, timesteps)
+                else:
+                    raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
 
                 if args.with_prior_preservation:
                     # Chunk the noise and noise_pred into two parts and compute the loss on each part separately.
