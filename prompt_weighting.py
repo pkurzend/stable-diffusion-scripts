@@ -167,7 +167,7 @@ def get_token_weights(tokenizer, text):
 
             prompt_attention_mask += [a*weight for a in attention_mask]
 
-        prompt_attention_mask = [1] + prompt_attention_mask + [1]
+        prompt_attention_mask = [1] + prompt_attention_mask #+ [1] # adding 1 for start and end token
 
         attention_masks.append(prompt_attention_mask)
         prompts.append(clean_prompt)
