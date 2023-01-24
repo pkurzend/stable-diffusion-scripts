@@ -8,6 +8,7 @@ import os
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Optional
+import shutil
 
 import torch
 import torch.nn.functional as F
@@ -17,11 +18,12 @@ from torch.utils.data import Dataset
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
-from diffusers import AutoencoderKL, DDIMScheduler, DDPMScheduler, StableDiffusionPipeline, UNet2DConditionModel
+from diffusers import AutoencoderKL, DDIMScheduler, DDPMScheduler, StableDiffusionPipeline, UNet2DConditionModel, StableDiffusionInpaintPipeline
 from diffusers.optimization import get_scheduler
 from huggingface_hub import HfFolder, Repository, whoami
 from PIL import Image
 from torchvision import transforms
+from torchvision.utils import save_image
 from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
 
@@ -252,6 +254,12 @@ def parse_args(input_args=None):
         default=None,
         help="Path to json containing multiple concepts, will overwrite parameters like instance_prompt, class_prompt, etc.",
     )
+    parser.add_argument(
+        "--inpainting", 
+        action="store_true",
+        default=False,
+        help="Train the model for inpainting by passing masked images."
+    )
 
     if input_args is not None:
         args = parser.parse_args(input_args)
@@ -261,8 +269,34 @@ def parse_args(input_args=None):
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
     if env_local_rank != -1 and env_local_rank != args.local_rank:
         args.local_rank = env_local_rank
+    
+    if args.inpainting and not args.not_cache_latents:
+        print("Can not cache latents for inpainting")
+        args.not_cache_latents = True
 
     return args
+
+def get_cutout_holes(height, width, min_holes=8, max_holes=32, min_height=16, max_height=128, min_width=16, max_width=128):
+    holes = []
+    for _n in range(random.randint(min_holes, max_holes)):
+        hole_height = random.randint(min_height, max_height)
+        hole_width = random.randint(min_width, max_width)
+        y1 = random.randint(0, height - hole_height)
+        x1 = random.randint(0, width - hole_width)
+        y2 = y1 + hole_height
+        x2 = x1 + hole_width
+        holes.append((x1, y1, x2, y2))
+    return holes
+
+def generate_random_mask(image):
+    mask = torch.zeros_like(image[:1])
+    holes = get_cutout_holes(mask.shape[1], mask.shape[2])
+    for (x1, y1, x2, y2) in holes:
+        mask[:, y1:y2, x1:x2] = 1.
+    if random.uniform(0, 1) < 0.25:
+        mask.fill_(1.)
+    masked_image = image * (mask < 0.5)
+    return mask, masked_image
 
 
 class DreamBoothDataset(Dataset):
@@ -280,7 +314,8 @@ class DreamBoothDataset(Dataset):
         center_crop=False,
         num_class_images=None,
         pad_tokens=False,
-        hflip=False
+        hflip=False,
+        mask_images=False,
     ):
         self.size = size
         self.center_crop = center_crop
@@ -314,6 +349,8 @@ class DreamBoothDataset(Dataset):
             ]
         )
 
+        self.mask_images = mask_images
+
     def __len__(self):
         return self._length
 
@@ -324,6 +361,8 @@ class DreamBoothDataset(Dataset):
         if not instance_image.mode == "RGB":
             instance_image = instance_image.convert("RGB")
         example["instance_images"] = self.image_transforms(instance_image)
+        if self.mask_images:
+            example["instance_masks"], example["instance_masked_images"] = generate_random_mask(example["instance_images"])
         example["instance_prompt_ids"] = self.tokenizer(
             instance_prompt,
             padding="max_length" if self.pad_tokens else "do_not_pad",
@@ -337,6 +376,8 @@ class DreamBoothDataset(Dataset):
             if not class_image.mode == "RGB":
                 class_image = class_image.convert("RGB")
             example["class_images"] = self.image_transforms(class_image)
+            if self.mask_images:
+                example["class_masks"], example["class_masked_images"] = generate_random_mask(example["class_images"])
             example["class_prompt_ids"] = self.tokenizer(
                 class_prompt,
                 padding="max_length" if self.pad_tokens else "do_not_pad",
@@ -434,6 +475,8 @@ def main(args):
     else:
         with open(args.concepts_list, "r") as f:
             args.concepts_list = json.load(f)
+    
+    pipeline_choice = StableDiffusionInpaintPipeline if args.inpainting else StableDiffusionPipeline
 
     if args.with_prior_preservation:
         pipeline = None
@@ -445,7 +488,7 @@ def main(args):
             if cur_class_images < args.num_class_images:
                 torch_dtype = torch.float16 if accelerator.device.type == "cuda" else torch.float32
                 if pipeline is None:
-                    pipeline = StableDiffusionPipeline.from_pretrained(
+                    pipeline = pipeline_choice.from_pretrained(
                         args.pretrained_model_name_or_path,
                         vae=AutoencoderKL.from_pretrained(
                             args.pretrained_vae_name_or_path or args.pretrained_model_name_or_path,
@@ -468,16 +511,31 @@ def main(args):
 
                 sample_dataloader = accelerator.prepare(sample_dataloader)
 
-                with  torch.inference_mode(): # torch.autocast("cuda"),
-                    for example in tqdm(
-                        sample_dataloader, desc="Generating class images", disable=not accelerator.is_local_main_process
-                    ):
-                        images = pipeline(example["prompt"]).images
+                if args.inpainting:
+                    inp_img = Image.new("RGB", (512, 512), color=(0, 0, 0))
+                    inp_mask = Image.new("L", (512, 512), color=255)
 
-                        for i, image in enumerate(images):
-                            hash_image = hashlib.sha1(image.tobytes()).hexdigest()
-                            image_filename = class_images_dir / f"{example['index'][i] + cur_class_images}-{hash_image}.jpg"
-                            image.save(image_filename)
+                    with torch.inference_mode(): # torch.autocast("cuda"),
+                        for example in tqdm(sample_dataloader, desc="Generating class images", disable=not accelerator.is_local_main_process):
+                            images = pipeline(
+                                prompt=example["prompt"],
+                                image=inp_img,
+                                mask_image=inp_mask,
+                                num_inference_steps=args.save_infer_steps
+                            ).images
+                            for i, image in enumerate(images):
+                                hash_image = hashlib.sha1(image.tobytes()).hexdigest()
+                                image_filename = class_images_dir / f"{example['index'][i] + cur_class_images}-{hash_image}.jpg"
+                                image.save(image_filename)
+
+                else:
+                    with torch.inference_mode(): # torch.autocast("cuda"),
+                        for example in tqdm(sample_dataloader, desc="Generating class images", disable=not accelerator.is_local_main_process):
+                            images = pipeline(example["prompt"]).images
+                            for i, image in enumerate(images):
+                                hash_image = hashlib.sha1(image.tobytes()).hexdigest()
+                                image_filename = class_images_dir / f"{example['index'][i] + cur_class_images}-{hash_image}.jpg"
+                                image.save(image_filename)
 
         del pipeline
         if torch.cuda.is_available():
@@ -562,21 +620,31 @@ def main(args):
         center_crop=args.center_crop,
         num_class_images=args.num_class_images,
         pad_tokens=args.pad_tokens,
-        hflip=args.hflip
+        hflip=args.hflip,
+        mask_images=args.inpainting
     )
 
     def collate_fn(examples):
         input_ids = [example["instance_prompt_ids"] for example in examples]
         pixel_values = [example["instance_images"] for example in examples]
+        if args.inpainting:
+            mask_values = [example["instance_masks"] for example in examples]
+            masked_image_values = [example["instance_masked_images"] for example in examples]
 
         # Concat class and instance examples for prior preservation.
         # We do this to avoid doing two forward passes.
         if args.with_prior_preservation:
             input_ids += [example["class_prompt_ids"] for example in examples]
             pixel_values += [example["class_images"] for example in examples]
+            if args.inpainting:
+                mask_values += [example["class_masks"] for example in examples]
+                masked_image_values += [example["class_masked_images"] for example in examples]
 
-        pixel_values = torch.stack(pixel_values)
-        pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
+        pixel_values = torch.stack(pixel_values).to(memory_format=torch.contiguous_format).float()
+        if args.inpainting:
+            mask_values = torch.stack(mask_values).to(memory_format=torch.contiguous_format).float()
+            masked_image_values = torch.stack(masked_image_values).to(memory_format=torch.contiguous_format).float()
+
 
         input_ids = tokenizer.pad(
             {"input_ids": input_ids},
@@ -586,8 +654,15 @@ def main(args):
 
         batch = {
             "input_ids": input_ids,
-            "pixel_values": pixel_values,
+            "pixel_values": pixel_values
         }
+
+        if args.inpainting:
+            batch.update({
+                "mask_values": mask_values,
+                "masked_image_values": masked_image_values
+            })
+
         return batch
 
     train_dataloader = torch.utils.data.DataLoader(
@@ -643,7 +718,6 @@ def main(args):
     )
 
     if args.train_text_encoder:
-        print("CHP2")
         unet, text_encoder, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
             unet, text_encoder, optimizer, train_dataloader, lr_scheduler
         )
@@ -676,7 +750,7 @@ def main(args):
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
 
-    def save_weights(step, text_encoder):
+    def save_weights(step, unet, text_encoder, vae):
         # Create the pipeline using using the trained modules and save it.
         if accelerator.is_main_process:
             if args.train_text_encoder:
@@ -684,7 +758,10 @@ def main(args):
             else:
                 text_enc_model = CLIPTextModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision)
             scheduler =  DDIMScheduler.from_config(args.pretrained_model_name_or_path, subfolder="scheduler")
-            pipeline = StableDiffusionPipeline.from_pretrained(
+            if args.inpainting:
+                unet=accelerator.unwrap_model(unet).to(torch.float16)
+                text_encoder=text_enc_model.to(torch.float16)
+            pipeline = pipeline_choice.from_pretrained(
                 args.pretrained_model_name_or_path,
                 unet=accelerator.unwrap_model(unet),
                 text_encoder=text_enc_model,
@@ -703,26 +780,44 @@ def main(args):
             with open(os.path.join(save_dir, "args.json"), "w") as f:
                 json.dump(args.__dict__, f, indent=2)
 
+            pipeline = pipeline.to(accelerator.device)
+            pipeline.set_progress_bar_config(disable=True)
             if args.save_sample_prompt is not None:
-                pipeline = pipeline.to(accelerator.device)
-                g_cuda = torch.Generator(device=accelerator.device).manual_seed(args.seed)
-                pipeline.set_progress_bar_config(disable=True)
-                sample_dir = os.path.join(save_dir, "samples")
-                os.makedirs(sample_dir, exist_ok=True)
-                with torch.inference_mode(): # torch.autocast("cuda"), 
-                    for i in tqdm(range(args.n_save_sample), desc="Generating samples"):
-                        images = pipeline(
-                            args.save_sample_prompt,
-                            negative_prompt=args.save_sample_negative_prompt,
-                            guidance_scale=args.save_guidance_scale,
-                            num_inference_steps=args.save_infer_steps,
-                            generator=g_cuda
-                        ).images
-                        images[0].save(os.path.join(sample_dir, f"{i}.png"))
+                for idx, concept in enumerate(args.concepts_list):
+                    g_cuda = torch.Generator(device=accelerator.device).manual_seed(args.seed)
+                    sample_dir = os.path.join(save_dir, "samples", str(idx))
+                    os.makedirs(sample_dir, exist_ok=True)
+                    if args.inpainting:
+                        inp_img = Image.new("RGB", (512, 512), color=(0, 0, 0))
+                        inp_mask = Image.new("L", (512, 512), color=255)
+                    with torch.inference_mode():
+                        for i in tqdm(range(args.n_save_sample), desc="Generating samples"):
+                            if args.inpainting:
+                                images = pipeline(
+                                    prompt=concept["instance_prompt"],
+                                    image=inp_img,
+                                    mask_image=inp_mask,
+                                    negative_prompt=args.save_sample_negative_prompt,
+                                    guidance_scale=args.save_guidance_scale,
+                                    num_inference_steps=args.save_infer_steps,
+                                    generator=g_cuda
+                                ).images
+                            else:
+                                images = pipeline(
+                                    prompt=concept["instance_prompt"],
+                                    negative_prompt=args.save_sample_negative_prompt,
+                                    guidance_scale=args.save_guidance_scale,
+                                    num_inference_steps=args.save_infer_steps,
+                                    generator=g_cuda
+                                ).images
+                            images[0].save(os.path.join(sample_dir, f"{i}.png"))
                 del pipeline
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
-            print(f"[*] Weights saved at {save_dir}")
+                print(f"[*] Weights saved at {save_dir}")
+                if args.inpainting:
+                    unet.to(torch.float32)
+                    text_enc_model.to(torch.float32)
 
     # Only show the progress bar once on each machine.
     progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
@@ -734,6 +829,7 @@ def main(args):
         unet.train()
         if args.train_text_encoder:
             text_encoder.train()
+        if args.inpainting: random.shuffle(train_dataset.class_images_path)
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(unet):
                 # Convert images to latent space
@@ -742,7 +838,12 @@ def main(args):
                         latent_dist = batch[0][0]
                     else:
                         latent_dist = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist
+                        if args.inpainting:
+                            masked_latent_dist = vae.encode(batch["masked_image_values"].to(dtype=weight_dtype)).latent_dist
                     latents = latent_dist.sample() * 0.18215
+                    if args.inpainting:
+                        masked_image_latents = masked_latent_dist.sample() * 0.18215
+                        mask = F.interpolate(batch["mask_values"], scale_factor=1 / 8)
 
                 # Sample noise that we'll add to the latents
                 noise = torch.randn_like(latents)
@@ -764,11 +865,15 @@ def main(args):
                             encoder_hidden_states = batch[0][1]
                     else:
                         encoder_hidden_states = text_encoder(batch["input_ids"])[0]
+                
+                if args.inpainting:
+                    latent_model_input = torch.cat([noisy_latents, mask, masked_image_latents], dim=1)
 
                 # Predict the noise residual
-                noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
+                noise_pred = unet(noisy_latents if not args.inpainting else latent_model_input, timesteps, encoder_hidden_states).sample
 
                 # Get the target for loss depending on the prediction type
+                #if not args.inpainting:
                 if noise_scheduler.config.prediction_type == "epsilon":
                     noise = noise
                 elif noise_scheduler.config.prediction_type == "v_prediction":
@@ -811,7 +916,7 @@ def main(args):
                 accelerator.log(logs, step=global_step)
 
             if global_step > 0 and not global_step % args.save_interval and global_step >= args.save_min_steps:
-                save_weights(global_step, text_encoder)
+                save_weights(global_step, unet, text_encoder, vae)
 
             progress_bar.update(1)
             global_step += 1
@@ -821,7 +926,7 @@ def main(args):
 
         accelerator.wait_for_everyone()
 
-    save_weights(global_step, text_encoder)
+    save_weights(global_step, unet, text_encoder, vae)
 
     accelerator.end_training()
 
