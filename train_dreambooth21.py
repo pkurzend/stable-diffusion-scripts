@@ -750,7 +750,7 @@ def main(args):
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
 
-    def save_weights(step, unet, text_encoder, vae):
+    def save_weights(step, unet, text_encoder):
         # Create the pipeline using using the trained modules and save it.
         if accelerator.is_main_process:
             if args.train_text_encoder:
@@ -916,7 +916,7 @@ def main(args):
                 accelerator.log(logs, step=global_step)
 
             if global_step > 0 and not global_step % args.save_interval and global_step >= args.save_min_steps:
-                save_weights(global_step, unet, text_encoder, vae)
+                save_weights(global_step, unet, text_encoder)
 
             progress_bar.update(1)
             global_step += 1
@@ -926,7 +926,7 @@ def main(args):
 
         accelerator.wait_for_everyone()
 
-    save_weights(global_step, unet, text_encoder, vae)
+    save_weights(global_step, unet, text_encoder)
 
     accelerator.end_training()
 
