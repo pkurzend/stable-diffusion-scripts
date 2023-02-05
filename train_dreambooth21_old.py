@@ -18,7 +18,7 @@ from torch.utils.data import Dataset
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
-from diffusers import AutoencoderKL, DDIMScheduler, DDPMScheduler, DiffusionPipeline, StableDiffusionPipeline, UNet2DConditionModel, StableDiffusionInpaintPipeline
+from diffusers import AutoencoderKL, DDIMScheduler, DDPMScheduler, StableDiffusionPipeline, UNet2DConditionModel, StableDiffusionInpaintPipeline
 from diffusers.optimization import get_scheduler
 from huggingface_hub import HfFolder, Repository, whoami
 from PIL import Image
@@ -260,12 +260,6 @@ def parse_args(input_args=None):
         default=False,
         help="Train the model for inpainting by passing masked images."
     )
-    parser.add_argument(
-        "--depth2img", 
-        action="store_true",
-        default=False,
-        help="Train the model for depth2img by passing a depth map."
-    )
 
     if input_args is not None:
         args = parser.parse_args(input_args)
@@ -280,51 +274,8 @@ def parse_args(input_args=None):
         print("Can not cache latents for inpainting")
         args.not_cache_latents = True
 
-    if args.inpainting and args.depth2img:
-        print("Can not do inpainting and depth2img at the same time. Disabled depth2img.")
-        args.depth2img = False
-
     return args
 
-
-# depth2img
-def get_depth_image_path(normal_image_path):
-    return f'{normal_image_path.parent}_depth_maps' / str(normal_image_path).split('/')[-1]
-
-
-def create_depth_images(paths, pretrained_model_name_or_path, accelerator, unet, text_encoder):
-    pipeline = DiffusionPipeline.from_pretrained(
-            pretrained_model_name_or_path,
-            unet=accelerator.unwrap_model(unet),
-            text_encoder=accelerator.unwrap_model(text_encoder),
-            revision=args.revision,
-        )
-    pipeline.to("cuda")
-    for path in paths:
-        print(f"For each image in {path}, creating a depth image.")
-        os.makedirs(path.rstrip('/') + '_depth_maps', exist_ok=True)
-        path_iterator = Path(path).iterdir()
-
-        for image_path in tqdm(path_iterator):
-            depth_path = get_depth_image_path(image_path)
-            if depth_path.exists():
-                continue
-            image_instance = Image.open(image_path)
-            if not image_instance.mode == "RGB":
-                image_instance = image_instance.convert("RGB")
-
-            image_instance = pipeline.feature_extractor(image_instance, return_tensors="pt").pixel_values
-            image_instance = image_instance.to("cuda")
-            depth_map = pipeline.depth_estimator(image_instance).predicted_depth
-            depth_min = torch.amin(depth_map, dim=[0, 1, 2], keepdim=True)
-            depth_max = torch.amax(depth_map, dim=[0, 1, 2], keepdim=True)
-            depth_map = 2.0 * (depth_map - depth_min) / (depth_max - depth_min) - 1.0
-            depth_map = depth_map[0,:,:]
-            depth_map_image = transforms.ToPILImage()(depth_map)
-            depth_map_image.save(depth_path)
-    return 2 ** (len(pipeline.vae.config.block_out_channels) - 1)
-
-# inpainting
 def get_cutout_holes(height, width, min_holes=8, max_holes=32, min_height=16, max_height=128, min_width=16, max_width=128):
     holes = []
     for _n in range(random.randint(min_holes, max_holes)):
@@ -365,18 +316,12 @@ class DreamBoothDataset(Dataset):
         pad_tokens=False,
         hflip=False,
         mask_images=False,
-        depth2im=False,
-        vae_scale_factor=None,
     ):
         self.size = size
         self.center_crop = center_crop
         self.tokenizer = tokenizer
         self.with_prior_preservation = with_prior_preservation
         self.pad_tokens = pad_tokens
-
-        self.mask_images = mask_images
-        self.depth2im = depth2im
-        self.vae_scale_factor = vae_scale_factor
 
         self.instance_images_path = []
         self.class_images_path = []
@@ -404,14 +349,7 @@ class DreamBoothDataset(Dataset):
             ]
         )
 
-        self.depth_image_transforms = transforms.Compose(
-            [
-                transforms.Resize(size // self.vae_scale_factor, interpolation=transforms.InterpolationMode.BILINEAR),
-                transforms.ToTensor()
-            ]
-        )
-
-
+        self.mask_images = mask_images
 
     def __len__(self):
         return self._length
@@ -420,13 +358,11 @@ class DreamBoothDataset(Dataset):
         example = {}
         instance_path, instance_prompt = self.instance_images_path[index % self.num_instance_images]
         instance_image = Image.open(instance_path)
-
         if not instance_image.mode == "RGB":
             instance_image = instance_image.convert("RGB")
-
         example["instance_images"] = self.image_transforms(instance_image)
-
-
+        if self.mask_images:
+            example["instance_masks"], example["instance_masked_images"] = generate_random_mask(example["instance_images"])
         example["instance_prompt_ids"] = self.tokenizer(
             instance_prompt,
             padding="max_length" if self.pad_tokens else "do_not_pad",
@@ -434,41 +370,20 @@ class DreamBoothDataset(Dataset):
             max_length=self.tokenizer.model_max_length,
         ).input_ids
 
-        if self.mask_images:
-            example["instance_masks"], example["instance_masked_images"] = generate_random_mask(example["instance_images"])
-
-        elif self.depth2im:
-            instance_depth_image_path = get_depth_image_path(instance_path)
-            instance_depth_image = Image.open(instance_depth_image_path)
-            example["instance_depth_images"] = self.depth_image_transforms(instance_depth_image)
-
-
-
         if self.with_prior_preservation:
-
             class_path, class_prompt = self.class_images_path[index % self.num_class_images]
             class_image = Image.open(class_path)
-
             if not class_image.mode == "RGB":
                 class_image = class_image.convert("RGB")
-
             example["class_images"] = self.image_transforms(class_image)
-
-
+            if self.mask_images:
+                example["class_masks"], example["class_masked_images"] = generate_random_mask(example["class_images"])
             example["class_prompt_ids"] = self.tokenizer(
                 class_prompt,
                 padding="max_length" if self.pad_tokens else "do_not_pad",
                 truncation=True,
                 max_length=self.tokenizer.model_max_length,
             ).input_ids
-
-            if self.mask_images:
-                example["class_masks"], example["class_masked_images"] = generate_random_mask(example["class_images"])
-
-            elif self.depth2im:
-                class_depth_image_path = get_depth_image_path(class_path)
-                class_depth_image = Image.open(class_depth_image_path)
-                example["class_depth_images"] = self.depth_image_transforms(class_depth_image)
 
         return example
 
@@ -697,16 +612,6 @@ def main(args):
 
     noise_scheduler = DDPMScheduler.from_config(args.pretrained_model_name_or_path, subfolder="scheduler")
 
-    if args.depth2img:
-        for concept in args.concepts_list:
-            instance_data_dir = concept["instance_data_dir"]
-            class_data_dir = concept["class_data_dir"]
-
-            # vae_scale_factor is the same in each run, independent on input images
-            vae_scale_factor = create_depth_images([instance_data_dir, class_data_dir], args.pretrained_model_name_or_path, accelerator, unet, text_encoder)
-
-
-
     train_dataset = DreamBoothDataset(
         concepts_list=args.concepts_list,
         tokenizer=tokenizer,
@@ -716,9 +621,7 @@ def main(args):
         num_class_images=args.num_class_images,
         pad_tokens=args.pad_tokens,
         hflip=args.hflip,
-        mask_images=args.inpainting,
-        depth2im=args.depth2img,
-        vae_scale_factor=vae_scale_factor or None,
+        mask_images=args.inpainting
     )
 
     def collate_fn(examples):
@@ -727,9 +630,6 @@ def main(args):
         if args.inpainting:
             mask_values = [example["instance_masks"] for example in examples]
             masked_image_values = [example["instance_masked_images"] for example in examples]
-        
-        elif args.depth2img:
-            depth_values = [example["instance_depth_images"] for example in examples]
 
         # Concat class and instance examples for prior preservation.
         # We do this to avoid doing two forward passes.
@@ -739,18 +639,12 @@ def main(args):
             if args.inpainting:
                 mask_values += [example["class_masks"] for example in examples]
                 masked_image_values += [example["class_masked_images"] for example in examples]
-            
-            elif args.depth2img:
-                depth_values += [example["class_depth_images"] for example in examples]
 
         pixel_values = torch.stack(pixel_values).to(memory_format=torch.contiguous_format).float()
         if args.inpainting:
             mask_values = torch.stack(mask_values).to(memory_format=torch.contiguous_format).float()
             masked_image_values = torch.stack(masked_image_values).to(memory_format=torch.contiguous_format).float()
-        
-        elif args.depth2img:
-            depth_values = torch.stack(depth_values)
-            depth_values = depth_values.to(memory_format=torch.contiguous_format).float()
+
 
         input_ids = tokenizer.pad(
             {"input_ids": input_ids},
@@ -768,11 +662,6 @@ def main(args):
                 "mask_values": mask_values,
                 "masked_image_values": masked_image_values
             })
-
-        elif args.depth2img:
-            batch.update({
-                "depth_values": depth_values
-            })    
 
         return batch
 
@@ -978,14 +867,10 @@ def main(args):
                         encoder_hidden_states = text_encoder(batch["input_ids"])[0]
                 
                 if args.inpainting:
-                    noisy_latents = torch.cat([noisy_latents, mask, masked_image_latents], dim=1)
-
-                elif args.depth2img:
-                    # Brian: do we add noise to depth or not? I think no
-                    noisy_latents = torch.cat([noisy_latents, batch["depth_values"]], dim=1)
+                    latent_model_input = torch.cat([noisy_latents, mask, masked_image_latents], dim=1)
 
                 # Predict the noise residual
-                noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
+                noise_pred = unet(noisy_latents if not args.inpainting else latent_model_input, timesteps, encoder_hidden_states).sample
 
                 # Get the target for loss depending on the prediction type
                 #if not args.inpainting:
