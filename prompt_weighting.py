@@ -179,7 +179,7 @@ def get_token_weights(tokenizer, text):
     return torch.Tensor(attention_masks), prompts
 
 
-def _encode_prompt(self, prompt, device, num_images_per_prompt, do_classifier_free_guidance, negative_prompt):
+def _encode_prompt(self, prompt, device, num_images_per_prompt, do_classifier_free_guidance, negative_prompt, prompt_embeds=None, negative_prompt_embeds=None):
     r"""
     Encodes the prompt into text encoder hidden states.
     Args:
