@@ -421,12 +421,13 @@ class DreamBoothDataset(Dataset):
             ]
         )
 
-        self.depth_image_transforms = transforms.Compose(
-            [
-                transforms.Resize(size // self.vae_scale_factor, interpolation=transforms.InterpolationMode.BILINEAR),
-                transforms.ToTensor()
-            ]
-        )
+        if self.depth2im:
+            self.depth_image_transforms = transforms.Compose(
+                [
+                    transforms.Resize(size // self.vae_scale_factor, interpolation=transforms.InterpolationMode.BILINEAR),
+                    transforms.ToTensor()
+                ]
+            )
 
 
 
